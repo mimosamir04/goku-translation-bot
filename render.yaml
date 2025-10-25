@@ -1,34 +1,14 @@
 services:
   - type: web
-    name: goku-bot-health
+    name: goku-bot
     env: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: python health_check.py
+    startCommand: python start.py
     envVars:
       - key: PORT
         value: 8080
       - key: TELEGRAM_BOT_TOKEN
-        fromDatabase:
-          name: telegram-bot-token
-          property: connectionString
+        sync: false  # Set this in Render dashboard
       - key: GOOGLE_API_KEY
-        fromDatabase:
-          name: google-api-key
-          property: connectionString
-
-  - type: worker
-    name: goku-bot-worker
-    env: python
-    plan: free
-    buildCommand: pip install -r requirements.txt
-    startCommand: python bot.py
-    envVars:
-      - key: TELEGRAM_BOT_TOKEN
-        fromDatabase:
-          name: telegram-bot-token
-          property: connectionString
-      - key: GOOGLE_API_KEY
-        fromDatabase:
-          name: google-api-key
-          property: connectionString
+        sync: false  # Set this in Render dashboard
