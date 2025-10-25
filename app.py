@@ -38,7 +38,16 @@ def run_bot():
         main()
     except Exception as e:
         print(f"❌ Bot error: {e}")
-        sys.exit(1)
+        print("🔄 Retrying in 5 seconds...")
+        import time
+        time.sleep(5)
+        # Try again once
+        try:
+            from bot import main
+            main()
+        except Exception as e2:
+            print(f"❌ Bot failed again: {e2}")
+            sys.exit(1)
 
 def main():
     """Main startup function"""
