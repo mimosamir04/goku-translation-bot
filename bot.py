@@ -72,7 +72,7 @@ try:
         logger.warning("⚠️ GOOGLE_API_KEY not set")
     else:
         genai.configure(api_key=api_key)
-        gemini_model = genai.GenerativeModel('gemini-pro')
+        gemini_model = genai.GenerativeModel('gemini-2.0-flash-exp')
         logger.info("✅ Gemini AI initialized successfully")
 except Exception as e:
     logger.error(f"❌ Failed to initialize Gemini AI: {e}")
@@ -180,20 +180,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         gemini_response = await ask_gemini(text)
         
         if gemini_response:
-            response = f"""
-🤖 إجابة من الذكاء الاصطناعي:
-
-📝 سؤالك:
-{text}
-
-💬 الإجابة:
-{gemini_response}
-"""
+            # 💡 التعديل: إزالة f-string الزائدة والمسافات البيضاء غير الضرورية
+            # نستخدم الاستجابة مباشرة لتجنب إضافة أسطر فارغة غير مرغوب فيها.
+            response = gemini_response.strip() 
+            
             await update.message.reply_text(response)
         else:
             await update.message.reply_text("❌ عذراً، لم أتمكن من الإجابة على سؤالك. حاول لاحقاً.")
         return
-    
     # Default behavior: translate the text
     # Detect language
     detected_lang = detect_language(text)
