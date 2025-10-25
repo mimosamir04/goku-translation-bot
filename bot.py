@@ -18,9 +18,7 @@ from telegram.ext import (
 )
 from telegram.constants import ChatAction, ParseMode
 
-import threading
-import server  
-threading.Thread(target=server.__main__).start()
+# Server functionality moved to app.py
 
 # ========== LOGGING CONFIGURATION ==========
 logging.basicConfig(
