@@ -28,7 +28,8 @@ def health():
 def run_flask():
     """Run Flask health check server"""
     port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+    print(f"🌐 Starting Flask server on port {port}")
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False, threaded=True)
 
 def run_bot():
     """Run the Telegram bot"""
@@ -70,8 +71,9 @@ def main():
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
     
-    # Give Flask time to start
-    time.sleep(2)
+    # Give Flask time to start and bind to port
+    print("⏳ Waiting for Flask server to start...")
+    time.sleep(5)
     
     # Start the bot
     print("🤖 Starting Telegram bot...")
