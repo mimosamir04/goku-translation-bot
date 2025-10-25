@@ -1,8 +1,3 @@
-#!/usr/bin/env python3
-"""
-Simple deployment script for Goku Bot
-"""
-
 import subprocess
 import sys
 import datetime
@@ -12,7 +7,7 @@ def deploy(message=None):
     if not message:
         message = f"Update: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
     
-    print("🐉 Deploying Goku Bot...")
+    print("Deploying Goku Bot...")
     
     commands = [
         "git add .",
@@ -21,17 +16,17 @@ def deploy(message=None):
     ]
     
     for cmd in commands:
-        print(f"🔄 Running: {cmd}")
+        print(f"Running: {cmd}")
         try:
             subprocess.run(cmd, shell=True, check=True)
-            print("✅ Success")
+            print("Success")
         except subprocess.CalledProcessError as e:
-            print(f"❌ Failed: {e}")
+            print(f"Failed: {e}")
             return False
     
-    print("\n🎉 Deployment successful!")
-    print("🌐 GitHub: https://github.com/mimosamir04/goku-translation-bot")
-    print("🔄 Render will auto-deploy")
+    print("\nDeployment successful!")
+    print("GitHub: https://github.com/mimosamir04/goku-translation-bot")
+    print("Render will auto-deploy")
     return True
 
 if __name__ == "__main__":

@@ -4,686 +4,391 @@ import re
 from datetime import datetime
 from typing import Optional, Dict, Any
 from dotenv import load_dotenv
-from functools import wraps
 
-from google.cloud import translate_v2 as translate
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+try:
+    from google.cloud import translate_v2
+    from google.oauth2 import service_account
+except ImportError:
+    print("Error: google-cloud-translate not installed. Run: pip install -r requirements.txt")
+    exit(1)
+
+import google.generativeai as genai
+
+from telegram import Update
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
-    CallbackQueryHandler,
     ContextTypes,
     filters,
 )
-from telegram.constants import ChatAction, ParseMode
+from telegram.constants import ChatAction
 
-# Server functionality moved to app.py
+# Load environment variables
+load_dotenv()
 
-# ========== LOGGING CONFIGURATION ==========
+# Setup logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO,
-    handlers=[
-        logging.FileHandler('bot.log', encoding='utf-8'),
-        logging.StreamHandler()
-    ]
+    level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# ========== ENVIRONMENT VARIABLES ==========
-load_dotenv()
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-
-if not TELEGRAM_BOT_TOKEN:
-    raise RuntimeError("❌ Missing TELEGRAM_BOT_TOKEN in .env file")
-
-# ========== BOT CONFIGURATION ==========
-# Bot is now available for all users (no topic restrictions)
-
-# ========== GOOGLE CLOUD TRANSLATE CONFIGURATION ==========
+translate_client = None
 try:
-    translate_client = translate.Client()
-    logger.info("✅ Google Cloud Translate client initialized")
+    # Check if credentials file exists
+    creds_path = os.getenv('GOOGLE_APPLICATION_CREDENTIALS')
+    
+    if creds_path and os.path.exists(creds_path):
+        logger.info(f"Using Google Cloud credentials from: {creds_path}")
+        translate_client = translate_v2.Client()
+        logger.info("✅ Google Cloud Translate initialized successfully")
+    else:
+        logger.warning("⚠️ GOOGLE_APPLICATION_CREDENTIALS not set or file not found")
+        logger.warning("Translation service will not be available")
+        logger.info("To set up Google Cloud Translate:")
+        logger.info("1. Create a service account in Google Cloud Console")
+        logger.info("2. Download the JSON credentials file")
+        logger.info("3. Set GOOGLE_APPLICATION_CREDENTIALS=/path/to/credentials.json")
+        
 except Exception as e:
     logger.error(f"❌ Failed to initialize Google Cloud Translate: {e}")
+    logger.error(f"Error type: {type(e).__name__}")
     translate_client = None
 
-# ========== BOT NAME VARIATIONS ==========
-BOT_NAMES = [
-    'goku', 'جوكو', 'ڨوكو', 'غوكو', 'قوكو',
-    'gokou', 'غوكـو', 'جـوكو', 'ڤوكو'
-]
+gemini_model = None
+try:
+    api_key = os.getenv('GOOGLE_API_KEY')
+    if not api_key:
+        logger.warning("⚠️ GOOGLE_API_KEY not set")
+    else:
+        genai.configure(api_key=api_key)
+        gemini_model = genai.GenerativeModel('gemini-pro')
+        logger.info("✅ Gemini AI initialized successfully")
+except Exception as e:
+    logger.error(f"❌ Failed to initialize Gemini AI: {e}")
+    gemini_model = None
 
-# ========== USER STATISTICS ==========
+# User statistics storage
 user_stats: Dict[int, Dict[str, Any]] = {}
 
-def update_user_stats(user_id: int, chars_translated: int = 0):
-    """Track user translation statistics"""
+# ========== UTILITY FUNCTIONS ==========
+
+def update_user_stats(user_id: int, text_length: int) -> None:
+    """Update user translation statistics"""
     if user_id not in user_stats:
         user_stats[user_id] = {
-            "translations": 0,
-            "chars_translated": 0,
-            "first_use": datetime.now(),
-            "last_use": datetime.now()
+            'translations': 0,
+            'characters': 0,
+            'first_use': datetime.now()
         }
-    
-    user_stats[user_id]["translations"] += 1
-    user_stats[user_id]["chars_translated"] += chars_translated
-    user_stats[user_id]["last_use"] = datetime.now()
+    user_stats[user_id]['translations'] += 1
+    user_stats[user_id]['characters'] += text_length
 
-# ========== RATE LIMITING DECORATOR ==========
-def rate_limit(max_per_minute: int = 20):
-    """Simple rate limiting decorator"""
-    user_requests = {}
-    
-    def decorator(func):
-        @wraps(func)
-        async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
-            user_id = update.effective_user.id
-            now = datetime.now()
-            
-            if user_id in user_requests:
-                requests, last_reset = user_requests[user_id]
-                if (now - last_reset).seconds >= 60:
-                    user_requests[user_id] = ([now], now)
-                elif len(requests) >= max_per_minute:
-                    await update.message.reply_text(
-                        "⏳ انتظر قليلاً! لقد أرسلت الكثير من الطلبات.\n"
-                        "جرب مرة أخرى بعد دقيقة."
-                    )
-                    return
-                else:
-                    requests.append(now)
-            else:
-                user_requests[user_id] = ([now], now)
-            
-            return await func(update, context)
-        return wrapper
-    return decorator
 
-# ========== HELPER FUNCTIONS ==========
-def contains_bot_name(text: str) -> bool:
-    """Check if text contains bot name"""
-    text_lower = text.lower()
-    for name in BOT_NAMES:
-        if name in text_lower:
-            return True
-    return False
+def detect_language(text: str) -> str:
+    """Detect if text is French or Arabic"""
+    # Arabic detection
+    arabic_pattern = re.compile(r'[\u0600-\u06FF]')
+    if arabic_pattern.search(text):
+        return 'ar'
+    
+    # Default to French
+    return 'fr'
 
-def remove_bot_name(text: str) -> str:
-    """Remove bot name from text"""
-    result = text
-    for name in BOT_NAMES:
-        # Case-insensitive removal
-        pattern = re.compile(re.escape(name), re.IGNORECASE)
-        result = pattern.sub('', result)
-    return result.strip()
-
-# ========== LANGUAGE DETECTION ==========
-async def detect_language_advanced(text: str) -> str:
-    """Advanced language detection using Google Cloud Translate"""
-    try:
-        if not translate_client:
-            return await fallback_language_detection(text)
-        
-        # Use Google Cloud Translate to detect language
-        detection = translate_client.detect_language(text)
-        detected_lang = detection['language']
-        confidence = detection.get('confidence', 0)
-        
-        logger.info(f"Detected language: {detected_lang} (confidence: {confidence})")
-        
-        # Map Google's language codes to our system
-        if detected_lang in ['ar', 'ar-SA', 'ar-AE', 'ar-EG']:
-            return 'arabic'
-        elif detected_lang in ['fr', 'fr-FR', 'fr-CA']:
-            return 'french'
-        elif detected_lang in ['en', 'en-US', 'en-GB']:
-            return 'english'
-        else:
-            return 'other'
-            
-    except Exception as e:
-        logger.error(f"Language detection error: {e}")
-        return await fallback_language_detection(text)
-
-async def fallback_language_detection(text: str) -> str:
-    """Fallback language detection using heuristics"""
-    try:
-        # Simple heuristic detection
-        arabic_chars = len(re.findall(r'[\u0600-\u06FF]', text))
-        latin_chars = len(re.findall(r'[a-zA-ZÀ-ÿ]', text))
-        
-        if arabic_chars > latin_chars:
-            return 'arabic'
-        elif latin_chars > arabic_chars:
-            return 'french'
-        else:
-            return 'unknown'
-    except:
-        return 'unknown'
-
-# ========== SPECIAL COMMANDS HANDLER ==========
-async def handle_special_command(text: str, user_name: str) -> Optional[str]:
-    """Handle special commands that require bot name"""
-    text_lower = text.lower()
-    
-    # Must contain bot name for special commands
-    if not contains_bot_name(text):
-        return None
-    
-    # Remove bot name to check the actual question
-    clean_text = remove_bot_name(text).strip()
-    
-    # Creator questions
-    creator_keywords = [
-        'من صنعك', 'من صانعك', 'من طورك', 'من المطور', 'من مطورك',
-        'who created you', 'who made you', 'who is your creator',
-        'qui t\'a créé', 'qui t\'a fait', 'qui est ton créateur',
-        'من انشأك', 'من بناك', 'صانعك من', 'مين صنعك'
-    ]
-    
-    for keyword in creator_keywords:
-        if keyword in text_lower:
-            return (
-                f"👨‍💻 مرحباً {user_name}!\n\n"
-                "صانعي ومطوري هو: @anes_miiih19 ✨\n\n"
-                "🐉 أنا Goku، بوت ترجمة ذكي صُنعت بواسطة أنس لمساعدتكم في الترجمة!"
-            )
-    
-    # Greeting responses
-    greeting_responses = {
-        'مرحبا': f'مرحباً {user_name}! 🐉 أنا Goku، بوت الترجمة الذكي! أرسل لي أي نص وسأترجمه لك!',
-        'مرحبا بك': f'أهلاً وسهلاً {user_name}! 🐉 جاهز للترجمة!',
-        'سلام': f'وعليكم السلام {user_name}! 🐉 كيف أساعدك اليوم؟',
-        'السلام عليكم': f'وعليكم السلام ورحمة الله {user_name}! 🐉',
-        'hello': f'Hello {user_name}! 🐉 I\'m Goku, your smart translation bot! Send me any text!',
-        'hi': f'Hi there {user_name}! 🐉 Ready to translate!',
-        'bonjour': f'Bonjour {user_name}! 🐉 Je suis Goku, votre bot de traduction! Envoyez-moi un texte!',
-        'salut': f'Salut {user_name}! 🐉 Prêt à traduire!',
-        'hey': f'Hey {user_name}! 🐉 What can I translate for you?',
-    }
-    
-    for greeting, response in greeting_responses.items():
-        if greeting in clean_text.lower():
-            return response
-    
-    # Help/question about capabilities
-    help_keywords = ['كيف', 'ماذا تفعل', 'what can you do', 'que peux-tu faire', 'help', 'مساعدة']
-    for keyword in help_keywords:
-        if keyword in clean_text.lower():
-            return (
-                f"🐉 مرحباً {user_name}!\n\n"
-                "أنا بوت ترجمة ذكي، أستطيع:\n"
-                "✅ الترجمة من الفرنسية → العربية\n"
-                "✅ الترجمة من العربية → الفرنسية\n"
-                "✅ تصحيح الأخطاء الإملائية تلقائياً\n"
-                "✅ فهم النصوص المختلطة\n\n"
-                "📝 فقط أرسل النص وأنا أترجمه!"
-            )
-    
-    return None
 
 # ========== TRANSLATION FUNCTION ==========
-async def translate_with_correction(text: str, from_lang: str, to_lang: str, user_id: int) -> str:
-    """Advanced translation using Google Cloud Translate"""
+
+async def translate_text(text: str, source_lang: str, target_lang: str, user_id: int) -> str:
+    """Translate text using Google Cloud Translate"""
     try:
-        logger.info(f"Translating {from_lang}→{to_lang} for user {user_id}")
-        
         if not translate_client:
-            return "❌ خدمة الترجمة غير متاحة حالياً. يرجى المحاولة لاحقاً."
+            logger.error("Translation client not initialized")
+            return "❌ خطأ: خدمة الترجمة غير متاحة حالياً.\n\nيرجى التحقق من:\n1. تثبيت مفتاح Google Cloud\n2. تفعيل Translate API\n3. تعيين GOOGLE_APPLICATION_CREDENTIALS"
         
-        # Map our language names to Google's language codes
-        lang_codes = {
-            'french': 'fr',
-            'arabic': 'ar',
-            'english': 'en'
-        }
+        logger.info(f"Translating {source_lang}→{target_lang} for user {user_id}: {text[:50]}...")
         
-        source_code = lang_codes.get(from_lang, 'auto')
-        target_code = lang_codes.get(to_lang, 'ar')
-        
-        # Use Google Cloud Translate
         result = translate_client.translate(
             text,
-            source_language=source_code,
-            target_language=target_code
+            source_language=source_lang,
+            target_language=target_lang
         )
         
-        translated = result['translatedText']
-        
-        if not translated:
-            return "❌ الترجمة فارغة. يرجى المحاولة مرة أخرى."
+        translated_text = result['translatedText']
+        logger.info(f"Translation successful: {translated_text[:50]}...")
         
         # Update statistics
         update_user_stats(user_id, len(text))
         
-        return translated
+        return translated_text
         
     except Exception as e:
         logger.error(f"Translation error: {str(e)}")
-        return f"❌ حدث خطأ في الترجمة: {str(e)[:100]}\n\nحاول مرة أخرى أو تواصل مع @anes_miih19"
+        return f"❌ خطأ في الترجمة: {str(e)[:100]}"
 
-# ========== SMART LANGUAGE DETECTION AND TRANSLATION ==========
-async def smart_translate(text: str, user_id: int) -> tuple[str, str]:
-    """Detect language and translate smartly"""
-    
-    # Detect language
-    detected_lang = await detect_language_advanced(text)
-    logger.info(f"Detected language: {detected_lang}")
-    
-    # Handle based on detection
-    if detected_lang == 'french':
-        translated = await translate_with_correction(text, 'french', 'arabic', user_id)
-        direction = "🇫🇷 → 🇸🇦"
-        
-    elif detected_lang == 'arabic':
-        translated = await translate_with_correction(text, 'arabic', 'french', user_id)
-        direction = "🇸🇦 → 🇫🇷"
-        
-    elif detected_lang == 'english':
-        # Try to translate English as French
-        translated = await translate_with_correction(text, 'french', 'arabic', user_id)
-        direction = "🇬🇧→🇫🇷 → 🇸🇦"
-        
-    elif detected_lang == 'mixed':
-        # Try French to Arabic first
-        translated = await translate_with_correction(text, 'french', 'arabic', user_id)
-        direction = "🔀 → 🇸🇦"
-        
-    else:
-        return (
-            "⚠️ لم أتمكن من تحديد اللغة.\n\n"
-            "الرجاء إرسال نص بالفرنسية 🇫🇷 أو العربية 🇸🇦",
-            "❌"
-        )
-    
-    return translated, direction
 
-# ========== COMMAND HANDLERS ==========
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Start command with comprehensive instructions"""
+# ========== GEMINI AI FUNCTION ==========
+
+async def ask_gemini(question: str) -> Optional[str]:
+    """Ask Gemini AI a question"""
+    try:
+        if not gemini_model:
+            logger.warning("Gemini model not initialized")
+            return None
+        
+        logger.info(f"Asking Gemini: {question[:50]}...")
+        
+        response = gemini_model.generate_content(question)
+        
+        if response.text:
+            logger.info(f"Gemini response: {response.text[:50]}...")
+            return response.text
+        
+        return None
+        
+    except Exception as e:
+        logger.error(f"Gemini error: {str(e)}")
+        return None
+
+
+# ========== LANGUAGE DETECTION ==========
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle regular messages"""
     user = update.effective_user
-    logger.info(f"User {user.id} ({user.username}) started the bot")
+    text = update.message.text
+    user_id = user.id
     
-    keyboard = [
-        [
-            InlineKeyboardButton("📖 المساعدة", callback_data="help"),
-            InlineKeyboardButton("📊 إحصائياتي", callback_data="stats")
-        ],
-        [
-            InlineKeyboardButton("🌐 اللغات المدعومة", callback_data="languages"),
-            InlineKeyboardButton("ℹ️ حول", callback_data="about")
-        ]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    logger.info(f"Message from {user.id}: {text}")
     
-    welcome_msg = (
-        f"🐉 <b>مرحباً {user.first_name}!</b>\n\n"
-        "أنا <b>Goku</b> - بوت ترجمة ذكي ثنائي الاتجاه! 🤖\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n"
-        "✨ <b>المميزات:</b>\n"
-        "✅ ترجمة فرنسي ↔️ عربي\n"
-        "✅ تصحيح الأخطاء الإملائية تلقائياً\n"
-        "✅ كشف اللغة الذكي\n"
-        "✅ معالجة النصوص الطويلة\n"
-        "✅ الحفاظ على الأسماء والأرقام\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n"
-        "📝 <b>كيفية الاستخدام:</b>\n\n"
-        "🔹 <b>للترجمة فقط:</b>\n"
-        "   فقط أرسل النص مباشرة وسأترجمه!\n\n"
-        "🔹 <b>للأسئلة الخاصة:</b>\n"
-        "   اكتب اسمي أولاً ثم سؤالك:\n"
-        "   <code>ڨوكو من صنعك؟</code>\n"
-        "   <code>Goku مرحباً!</code>\n"
-        "   <code>Goku كيف حالك؟</code>\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n"
-        "💡 <b>أمثلة:</b>\n"
-        "📤 <code>Bonjour comment ça va?</code>\n"
-        "📥 مرحباً كيف حالك؟\n\n"
-        "📤 <code>أنا بخير شكراً</code>\n"
-        "📥 Je vais bien merci\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n"
-        "👨‍💻 <b>المطور:</b> @anes_miiih19\n"
-        "🆔 <b>جرب:</b> اكتب <code>ڨوكو من صنعك؟</code>"
-    )
+    # Show typing indicator
+    await update.message.chat.send_action(ChatAction.TYPING)
     
-    await update.message.reply_text(
-        welcome_msg,
-        reply_markup=reply_markup,
-        parse_mode=ParseMode.HTML
-    )
+    is_question = text.strip().endswith('?')
+    
+    if is_question:
+        # Use Gemini AI for questions
+        gemini_response = await ask_gemini(text)
+        
+        if gemini_response:
+            response = f"""
+🤖 إجابة من الذكاء الاصطناعي:
 
-async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Help command"""
-    help_text = (
-        "📚 <b>دليل الاستخدام الكامل</b>\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n"
-        "🎯 <b>الأوامر المتاحة:</b>\n"
-        "/start - بدء المحادثة\n"
-        "/help - عرض المساعدة\n"
-        "/stats - إحصائيات الاستخدام\n"
-        "/language - اللغات المدعومة\n"
-        "/about - حول البوت\n"
-        "/ping - اختبار البوت\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n"
-        "📝 <b>طريقتان للاستخدام:</b>\n\n"
-        "1️⃣ <b>الترجمة المباشرة:</b>\n"
-        "   أرسل النص فقط دون اسم البوت\n"
-        "   سيتم الكشف التلقائي والترجمة\n\n"
-        "2️⃣ <b>الأسئلة والمحادثة:</b>\n"
-        "   اكتب اسمي أولاً: ڨوكو / Goku\n"
-        "   مثال: <code>ڨوكو من صنعك؟</code>\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n"
-        "✨ <b>المميزات الذكية:</b>\n"
-        "✅ تصحيح الأخطاء الإملائية\n"
-        "✅ فهم النصوص المختلطة\n"
-        "✅ الحفاظ على التنسيق\n"
-        "✅ معالجة حتى 8000 حرف\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n"
-        "🎓 <b>نصائح:</b>\n"
-        "• لا تقلق من الأخطاء - سأصححها!\n"
-        "• الأسماء الخاصة تبقى كما هي\n"
-        "• الأرقام لا تُترجم\n"
-        "• يمكنك إرسال فقرات كاملة\n\n"
-        "👨‍💻 صُنعت بواسطة: @anes_miih19"
-    )
-    
-    await update.message.reply_text(help_text, parse_mode=ParseMode.HTML)
+📝 سؤالك:
+{text}
 
-async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show user statistics"""
+💬 الإجابة:
+{gemini_response}
+"""
+            await update.message.reply_text(response)
+        else:
+            await update.message.reply_text("❌ عذراً، لم أتمكن من الإجابة على سؤالك. حاول لاحقاً.")
+        return
+    
+    # Default behavior: translate the text
+    # Detect language
+    detected_lang = detect_language(text)
+    
+    # Determine target language
+    if detected_lang == 'ar':
+        target_lang = 'fr'
+        target_lang_name = 'الفرنسية'
+        source_lang_name = 'العربية'
+    else:
+        target_lang = 'ar'
+        target_lang_name = 'العربية'
+        source_lang_name = 'الفرنسية'
+    
+    # Try translation first
+    translated = await translate_text(text, detected_lang, target_lang, user_id)
+    
+    # If translation looks good, send it
+    if not translated.startswith('❌'):
+        response = f"""
+🔄 الترجمة:
+
+📌 اللغة الأصلية: {source_lang_name}
+🎯 اللغة المستهدفة: {target_lang_name}
+
+📝 النص الأصلي:
+{text}
+
+✅ النص المترجم:
+{translated}
+"""
+        await update.message.reply_text(response)
+    else:
+        # If translation fails, try Gemini AI
+        gemini_response = await ask_gemini(text)
+        
+        if gemini_response:
+            response = f"""
+🤖 إجابة من الذكاء الاصطناعي:
+
+📝 سؤالك:
+{text}
+
+💬 الإجابة:
+{gemini_response}
+"""
+            await update.message.reply_text(response)
+        else:
+            await update.message.reply_text(translated)
+
+
+async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /ask command for AI questions"""
+    user = update.effective_user
+    
+    # Get the question from command arguments
+    if not context.args:
+        await update.message.reply_text(
+            "استخدام: /ask السؤال\n\n"
+            "مثال: /ask ما هي عاصمة فرنسا؟"
+        )
+        return
+    
+    question = ' '.join(context.args)
+    
+    logger.info(f"User {user.id} asking: {question}")
+    
+    # Show typing indicator
+    await update.message.chat.send_action(ChatAction.TYPING)
+    
+    # Ask Gemini AI
+    gemini_response = await ask_gemini(question)
+    
+    if gemini_response:
+        response = f"""
+🤖 إجابة من الذكاء الاصطناعي:
+
+📝 سؤالك:
+{question}
+
+💬 الإجابة:
+{gemini_response}
+"""
+        await update.message.reply_text(response)
+    else:
+        await update.message.reply_text("❌ عذراً، لم أتمكن من الإجابة على سؤالك. حاول لاحقاً.")
+
+
+# ========== TELEGRAM HANDLERS ==========
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /start command"""
+    user = update.effective_user
+    welcome_message = f"""
+مرحباً {user.first_name}! 👋
+
+أنا بوت الترجمة الذكي! 🤖
+
+يمكنني مساعدتك في:
+✅ ترجمة النصوص من الفرنسية إلى العربية
+✅ ترجمة النصوص من العربية إلى الفرنسية
+✅ الإجابة على أسئلتك باستخدام الذكاء الاصطناعي
+
+طرق الاستخدام:
+1️⃣ أرسل نصاً عادياً → سأترجمه
+2️⃣ أرسل سؤالاً ينتهي بـ (؟) → سأجيب عليه بالذكاء الاصطناعي
+3️⃣ استخدم /ask السؤال → للأسئلة المباشرة
+
+الأوامر المتاحة:
+/start - عرض هذه الرسالة
+/help - الحصول على المساعدة
+/ask - اسأل سؤالاً
+/stats - عرض إحصائياتك
+"""
+    await update.message.reply_text(welcome_message)
+    logger.info(f"User {user.id} started the bot")
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /help command"""
+    help_message = """
+📖 دليل الاستخدام:
+
+1️⃣ **الترجمة من الفرنسية إلى العربية:**
+   أرسل النص الفرنسي وسأترجمه للعربية تلقائياً
+
+2️⃣ **الترجمة من العربية إلى الفرنسية:**
+   أرسل النص العربي وسأترجمه للفرنسية تلقائياً
+
+3️⃣ **الأسئلة العامة - الطريقة الأولى:**
+   أرسل سؤالك ينتهي بـ (؟) وسأجيب عليه بالذكاء الاصطناعي
+   مثال: ما هي عاصمة فرنسا؟
+
+4️⃣ **الأسئلة العامة - الطريقة الثانية:**
+   استخدم /ask متبوعاً بسؤالك
+   مثال: /ask ما هي عاصمة فرنسا
+
+📊 الأوامر:
+/ask - اسأل سؤالاً
+/stats - عرض عدد الترجمات والأحرف المترجمة
+/help - عرض هذه الرسالة
+
+💡 نصيحة: كلما أرسلت نصاً أطول، كانت الترجمة أدق!
+"""
+    await update.message.reply_text(help_message)
+
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /stats command"""
     user_id = update.effective_user.id
     
     if user_id not in user_stats:
-        await update.message.reply_text(
-            "📊 <b>إحصائياتك</b>\n\n"
-            "لم تقم بأي ترجمات بعد.\n"
-            "أرسل نصاً وابدأ الآن! 🚀",
-            parse_mode=ParseMode.HTML
-        )
+        await update.message.reply_text("لم تقم بأي ترجمة حتى الآن! 📊")
         return
     
     stats = user_stats[user_id]
-    usage_days = max((datetime.now() - stats["first_use"]).days, 1)
-    avg_per_day = stats['translations'] / usage_days
-    
-    stats_text = (
-        "📊 <b>إحصائياتك الشخصية</b>\n\n"
-        f"🔢 <b>عدد الترجمات:</b> {stats['translations']:,}\n"
-        f"📝 <b>الأحرف المترجمة:</b> {stats['chars_translated']:,}\n"
-        f"📅 <b>عضو منذ:</b> {usage_days} يوم\n"
-        f"📈 <b>متوسط يومي:</b> {avg_per_day:.1f} ترجمة\n"
-        f"🕒 <b>آخر استخدام:</b> {stats['last_use'].strftime('%Y-%m-%d %H:%M')}\n\n"
-        f"⭐ <b>متوسط الأحرف:</b> {stats['chars_translated'] // max(stats['translations'], 1):,} حرف/ترجمة\n\n"
-        "🐉 استمر في الترجمة! أنت رائع!"
-    )
-    
-    await update.message.reply_text(stats_text, parse_mode=ParseMode.HTML)
+    stats_message = f"""
+📊 إحصائياتك:
 
-async def language_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show supported languages"""
-    lang_text = (
-        "🌐 <b>اللغات المدعومة</b>\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n"
-        "<b>الترجمة الثنائية الكاملة:</b>\n\n"
-        "🇫🇷 <b>الفرنسية</b> ↔️ <b>العربية</b> 🇸🇦\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n"
-        "✨ <b>المميزات اللغوية:</b>\n\n"
-        "✅ الفرنسية الفصحى والعامية\n"
-        "✅ العربية الفصحى\n"
-        "✅ اللهجات العربية المختلفة\n"
-        "✅ تصحيح الأخطاء الإملائية\n"
-        "✅ فهم النصوص المختلطة\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n"
-        "🔜 <b>قريباً:</b>\n"
-        "• الإنجليزية\n"
-        "• الإسبانية\n"
-        "• المزيد من اللغات!\n\n"
-        "💡 اقتراحات؟ راسل @anes_miih19"
-    )
-    
-    await update.message.reply_text(lang_text, parse_mode=ParseMode.HTML)
+✅ عدد الترجمات: {stats['translations']}
+📝 عدد الأحرف المترجمة: {stats['characters']}
+📅 تاريخ الاستخدام الأول: {stats['first_use'].strftime('%Y-%m-%d %H:%M:%S')}
+"""
+    await update.message.reply_text(stats_message)
 
-async def about_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """About the bot"""
-    about_text = (
-        "ℹ️ <b>حول Goku Translation Bot</b>\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n"
-        "🐉 <b>من أنا؟</b>\n"
-        "أنا بوت ترجمة ذكي يستخدم أحدث\n"
-        "تقنيات الذكاء الاصطناعي لتقديم\n"
-        "ترجمات دقيقة وسريعة!\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n"
-        "🔧 <b>التقنيات:</b>\n"
-        "• Google Gemini 2.0 Flash\n"
-        "• Python Telegram Bot API\n"
-        "• معالجة اللغات الطبيعية\n"
-        "• خوارزميات تصحيح ذكية\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n"
-        "✨ <b>القدرات الخاصة:</b>\n"
-        "🎯 ترجمة ثنائية الاتجاه\n"
-        "🔍 كشف اللغة التلقائي\n"
-        "✏️ تصحيح الأخطاء الإملائية\n"
-        "📊 تتبع الإحصائيات\n"
-        "🛡️ حماية من الإفراط\n"
-        "🎨 واجهة تفاعلية\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n"
-        "👨‍💻 <b>المطور:</b>\n"
-        "@anes_miih19 ✨\n\n"
-        "📅 <b>النسخة:</b> 3.0 Final\n"
-        "📍 <b>التوبيك:</b> #473\n\n"
-        "💬 <b>للتواصل والاقتراحات:</b>\n"
-        "راسل @anes_miih19"
-    )
-    
-    await update.message.reply_text(about_text, parse_mode=ParseMode.HTML)
 
-async def ping_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Test command to check bot status"""
-    try:
-        await update.message.reply_text(
-            "✅ <b>اختبار البوت ناجح!</b>\n\n"
-            "🐉 <b>Goku Bot</b> يعمل بشكل طبيعي\n"
-            "📡 الحالة: نشط ومستعد للترجمة!\n\n"
-            "👨‍💻 المطور: @anes_miih19",
-            parse_mode=ParseMode.HTML
-        )
-        logger.info(f"Ping successful by user {update.effective_user.id}")
-    except Exception as e:
-        logger.error(f"Ping failed: {e}")
-        await update.message.reply_text(
-            f"❌ <b>فشل الاختبار</b>\n\n"
-            f"الخطأ: <code>{str(e)[:200]}</code>\n\n"
-            "تواصل مع @anes_miiih19",
-            parse_mode=ParseMode.HTML
-        )
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle errors"""
+    logger.error(f"Update {update} caused error {context.error}")
 
-# ========== CALLBACK QUERY HANDLER ==========
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle inline keyboard button presses"""
-    query = update.callback_query
-    await query.answer()
-    
-    class TempUpdate:
-        def __init__(self, msg):
-            self.message = msg
-            self.effective_user = msg.from_user
-            self.effective_chat = msg.chat
-    
-    temp_update = TempUpdate(query.message)
-    
-    handlers = {
-        "help": help_cmd,
-        "stats": stats_cmd,
-        "languages": language_cmd,
-        "about": about_cmd
-    }
-    
-    if query.data in handlers:
-        await handlers[query.data](temp_update, context)
 
-# ========== MAIN MESSAGE HANDLER ==========
-@rate_limit(max_per_minute=20)
-async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Main message handler - Available for all users"""
-    msg = update.message
-    chat = update.effective_chat
-    
-    # Basic validation
-    if not (chat and msg):
-        return
-    
-    user = update.effective_user
-    user_text = (msg.text or "").strip()
-    
-    if not user_text:
-        await msg.reply_text("⚠️ أرسل نصاً للترجمة.")
-        return
-    
-    # Check for special commands (requires bot name)
-    special_response = await handle_special_command(user_text, user.first_name)
-    if special_response:
-        await msg.reply_text(special_response, parse_mode=ParseMode.HTML)
-        return
-    
-    # Check text length
-    if len(user_text) > 8000:
-        await msg.reply_text(
-            f"⚠️ <b>النص طويل جداً!</b>\n\n"
-            f"الحد الأقصى: 8000 حرف\n"
-            f"نصك: {len(user_text):,} حرف\n\n"
-            f"قسّم النص إلى أجزاء أصغر.",
-            parse_mode=ParseMode.HTML
-        )
-        return
-    
-    # Show typing indicator
-    await context.bot.send_chat_action(
-        chat_id=chat.id,
-        action=ChatAction.TYPING
-    )
-    
-    # Translate
-    translated, direction = await smart_translate(user_text, user.id)
-    
-    # Format and send response
-    if direction == "❌":
-        # Error case
-        await msg.reply_text(translated)
-        return
-    
-    # Success case - split if needed
-    MAX_LEN = 4000
-    
-    if len(translated) <= MAX_LEN:
-        final_text = f"{direction}\n\n{translated}"
-        await msg.reply_text(final_text)
-    else:
-        # Smart splitting
-        chunks = []
-        current_chunk = ""
-        
-        # Split by paragraphs first
-        paragraphs = translated.split('\n\n')
-        
-        for para in paragraphs:
-            if len(current_chunk) + len(para) + 2 <= MAX_LEN:
-                current_chunk += para + "\n\n"
-            else:
-                if current_chunk:
-                    chunks.append(current_chunk.strip())
-                
-                # If single paragraph is too long, split by sentences
-                if len(para) > MAX_LEN:
-                    sentences = para.split('. ')
-                    temp_chunk = ""
-                    for sent in sentences:
-                        if len(temp_chunk) + len(sent) + 2 <= MAX_LEN:
-                            temp_chunk += sent + ". "
-                        else:
-                            if temp_chunk:
-                                chunks.append(temp_chunk.strip())
-                            temp_chunk = sent + ". "
-                    if temp_chunk:
-                        current_chunk = temp_chunk
-                    else:
-                        current_chunk = ""
-                else:
-                    current_chunk = para + "\n\n"
-        
-        if current_chunk:
-            chunks.append(current_chunk.strip())
-        
-        # Send chunks
-        for i, chunk in enumerate(chunks, 1):
-            if i == 1:
-                header = f"{direction} <b>[الجزء {i}/{len(chunks)}]</b>\n\n"
-            else:
-                header = f"<b>[الجزء {i}/{len(chunks)}]</b>\n\n"
-            
-            await msg.reply_text(
-                header + chunk,
-                parse_mode=ParseMode.HTML
-            )
-            
-            # Show typing for next chunk
-            if i < len(chunks):
-                await context.bot.send_chat_action(
-                    chat_id=chat.id,
-                    action=ChatAction.TYPING
-                )
+# ========== MAIN APPLICATION ==========
 
-# ========== ERROR HANDLER ==========
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Log errors and notify user"""
-    logger.error(f"Update {update} caused error {context.error}", exc_info=context.error)
-    
-    if update and update.effective_message:
-        await update.effective_message.reply_text(
-            "❌ <b>حدث خطأ!</b>\n\n"
-            "تم تسجيل الخطأ وسيتم إصلاحه.\n"
-            "حاول مرة أخرى أو تواصل مع @anes_miiih19",
-            parse_mode=ParseMode.HTML
-        )
-
-# ========== MAIN FUNCTION ==========
-def main():
+def main() -> None:
     """Start the bot"""
-    logger.info("🚀 Starting Goku Translation Bot v3.0 Final...")
+    # Get token from environment
+    token = os.getenv('TELEGRAM_BOT_TOKEN')
     
-    # Build application
-    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    if not token:
+        logger.error("❌ TELEGRAM_BOT_TOKEN not found in environment variables")
+        return
+    
+    logger.info("=" * 50)
+    logger.info("🚀 Starting Goku Translation Bot")
+    logger.info("=" * 50)
+    
+    # Create application
+    application = Application.builder().token(token).build()
     
     # Add handlers
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(CommandHandler("stats", stats_cmd))
-    app.add_handler(CommandHandler("language", language_cmd))
-    app.add_handler(CommandHandler("about", about_cmd))
-    app.add_handler(CommandHandler("ping", ping_bot))
-    app.add_handler(CallbackQueryHandler(button_callback))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("ask", ask_command))
+    application.add_handler(CommandHandler("stats", stats_command))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
     # Add error handler
-    app.add_error_handler(error_handler)
+    application.add_error_handler(error_handler)
     
-    # Start bot
-    logger.info("✅ Bot is running!")
-    print("\n" + "="*70)
-    print("🐉 GOKU TRANSLATION BOT v3.0 FINAL")
-    print("="*70)
-    print("✅ Status: ONLINE & READY")
-    print("🔧 Mode: Polling")
-    print("📊 Logging: Enabled (bot.log)")
-    print("🌐 Languages: French ↔️ Arabic")
-    print("🎯 Scope: Available for all users")
-    print("✨ Features: Auto-correction, Smart detection")
-    print("👨‍💻 Developer: @anes_miih19")
-    print("="*70 + "\n")
-    
-    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+    # Start the bot
+    logger.info("✅ Bot started successfully!")
+    logger.info("=" * 50)
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
-if __name__ == "__main__":
+
+if __name__ == '__main__':
     main()

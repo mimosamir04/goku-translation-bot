@@ -10,11 +10,11 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "🐉 Goku Translation Bot is running!"
+    return "Goku Translation Bot is running!"
 
 @app.route('/health')
 def health():
-    return {"status": "ok", "bot": "goku", "version": "3.0"}
+    return {"status": "ok", "bot": "goku", "version": "4.0"}
 
 @app.route('/status')
 def status():
@@ -22,5 +22,5 @@ def status():
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
-    print(f"🌐 Starting web server on port {port}")
+    print(f"Starting web server on port {port}")
     app.run(host="0.0.0.0", port=port, debug=False)
