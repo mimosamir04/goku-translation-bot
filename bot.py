@@ -11,6 +11,15 @@ try:
 except ImportError:
     print("Error: google-cloud-translate not installed. Run: pip install -r requirements.txt")
     exit(1)
+# single-instance lock to avoid duplicate polling in same container
+import sys
+try:
+    import fcntl
+    _lock_fh = open('.goku_bot.lock', 'w')
+    fcntl.lockf(_lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except Exception:
+    print("Another instance is already running. Exiting.")
+    sys.exit(1)
 
 import google.generativeai as genai
 
