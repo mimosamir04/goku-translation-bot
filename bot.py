@@ -6,7 +6,7 @@ from typing import Optional, Dict, Any
 from dotenv import load_dotenv
 from functools import wraps
 
-import google.generativeai as genai
+from google.cloud import translate_v2 as translate
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -34,29 +34,20 @@ logger = logging.getLogger(__name__)
 # ========== ENVIRONMENT VARIABLES ==========
 load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
 if not TELEGRAM_BOT_TOKEN:
     raise RuntimeError("❌ Missing TELEGRAM_BOT_TOKEN in .env file")
-if not GOOGLE_API_KEY:
-    raise RuntimeError("❌ Missing GOOGLE_API_KEY in .env file")
 
 # ========== BOT CONFIGURATION ==========
 # Bot is now available for all users (no topic restrictions)
 
-# ========== GEMINI AI CONFIGURATION ==========
-genai.configure(api_key=GOOGLE_API_KEY)
-
-# Main translation model
-translation_model = genai.GenerativeModel(
-    model_name="gemini-2.0-flash-exp",
-    generation_config={
-        "temperature": 0.3,
-        "top_p": 0.95,
-        "top_k": 40,
-        "max_output_tokens": 8192,
-    }
-)
+# ========== GOOGLE CLOUD TRANSLATE CONFIGURATION ==========
+try:
+    translate_client = translate.Client()
+    logger.info("✅ Google Cloud Translate client initialized")
+except Exception as e:
+    logger.error(f"❌ Failed to initialize Google Cloud Translate: {e}")
+    translate_client = None
 
 # ========== BOT NAME VARIATIONS ==========
 BOT_NAMES = [
@@ -131,39 +122,36 @@ def remove_bot_name(text: str) -> str:
 
 # ========== LANGUAGE DETECTION ==========
 async def detect_language_advanced(text: str) -> str:
-    """Advanced language detection with AI"""
+    """Advanced language detection using Google Cloud Translate"""
     try:
-        prompt = f"""Analyze this text and determine its PRIMARY language.
-Reply with ONLY ONE WORD from these options:
-- "arabic" if the text is primarily in Arabic (any dialect)
-- "french" if the text is primarily in French
-- "english" if the text is primarily in English
-- "mixed" if multiple languages are mixed
-- "other" for any other language
-
-Text to analyze: {text[:300]}
-
-Your answer (one word only):"""
+        if not translate_client:
+            return await fallback_language_detection(text)
         
-        response = translation_model.generate_content(prompt)
-        detected = response.text.strip().lower()
+        # Use Google Cloud Translate to detect language
+        detection = translate_client.detect_language(text)
+        detected_lang = detection['language']
+        confidence = detection.get('confidence', 0)
         
-        # Clean up response
-        if 'arabic' in detected or 'عربي' in detected:
+        logger.info(f"Detected language: {detected_lang} (confidence: {confidence})")
+        
+        # Map Google's language codes to our system
+        if detected_lang in ['ar', 'ar-SA', 'ar-AE', 'ar-EG']:
             return 'arabic'
-        elif 'french' in detected or 'français' in detected or 'francais' in detected:
+        elif detected_lang in ['fr', 'fr-FR', 'fr-CA']:
             return 'french'
-        elif 'english' in detected or 'anglais' in detected:
+        elif detected_lang in ['en', 'en-US', 'en-GB']:
             return 'english'
-        elif 'mixed' in detected:
-            return 'mixed'
         else:
             return 'other'
             
     except Exception as e:
         logger.error(f"Language detection error: {e}")
-        
-        # Fallback: Simple heuristic
+        return await fallback_language_detection(text)
+
+async def fallback_language_detection(text: str) -> str:
+    """Fallback language detection using heuristics"""
+    try:
+        # Simple heuristic detection
         arabic_chars = len(re.findall(r'[\u0600-\u06FF]', text))
         latin_chars = len(re.findall(r'[a-zA-ZÀ-ÿ]', text))
         
@@ -173,6 +161,8 @@ Your answer (one word only):"""
             return 'french'
         else:
             return 'unknown'
+    except:
+        return 'unknown'
 
 # ========== SPECIAL COMMANDS HANDLER ==========
 async def handle_special_command(text: str, user_name: str) -> Optional[str]:
@@ -237,62 +227,31 @@ async def handle_special_command(text: str, user_name: str) -> Optional[str]:
 
 # ========== TRANSLATION FUNCTION ==========
 async def translate_with_correction(text: str, from_lang: str, to_lang: str, user_id: int) -> str:
-    """Advanced translation with automatic spelling correction"""
+    """Advanced translation using Google Cloud Translate"""
     try:
         logger.info(f"Translating {from_lang}→{to_lang} for user {user_id}")
         
-        # Build comprehensive prompt
-        if from_lang == 'french' and to_lang == 'arabic':
-            prompt = f"""You are a professional French-to-Arabic translator with advanced capabilities.
-
-INSTRUCTIONS:
-1. First, analyze the input text and correct any spelling/grammar mistakes
-2. Then translate the CORRECTED text from French to Modern Standard Arabic
-3. Preserve proper names, numbers, dates, and brand names
-4. Maintain the original tone and style
-5. Return ONLY the Arabic translation (no explanations, no source text)
-6. If the text is not French, still attempt translation if possible
-
-Input text to translate:
-{text}
-
-Your Arabic translation:"""
-
-        elif from_lang == 'arabic' and to_lang == 'french':
-            prompt = f"""You are a professional Arabic-to-French translator with advanced capabilities.
-
-INSTRUCTIONS:
-1. First, analyze the input text and correct any spelling/grammar mistakes
-2. Then translate the CORRECTED text from Arabic to French
-3. Preserve proper names, numbers, dates, and brand names
-4. Maintain the original tone and style
-5. Return ONLY the French translation (no explanations, no source text)
-6. Handle both Modern Standard Arabic and dialects
-
-Input text to translate:
-{text}
-
-Your French translation:"""
-
-        else:
-            return f"❌ اتجاه الترجمة غير مدعوم: {from_lang} → {to_lang}"
+        if not translate_client:
+            return "❌ خدمة الترجمة غير متاحة حالياً. يرجى المحاولة لاحقاً."
         
-        # Generate translation
-        response = translation_model.generate_content(prompt)
+        # Map our language names to Google's language codes
+        lang_codes = {
+            'french': 'fr',
+            'arabic': 'ar',
+            'english': 'en'
+        }
         
-        # Extract translation
-        if hasattr(response, 'text') and response.text:
-            translated = response.text.strip()
-        elif hasattr(response, 'candidates') and response.candidates:
-            translated = ""
-            for candidate in response.candidates:
-                if hasattr(candidate, 'content'):
-                    for part in candidate.content.parts:
-                        if hasattr(part, 'text'):
-                            translated += part.text
-            translated = translated.strip()
-        else:
-            return "❌ لم أتمكن من الترجمة. حاول مرة أخرى."
+        source_code = lang_codes.get(from_lang, 'auto')
+        target_code = lang_codes.get(to_lang, 'ar')
+        
+        # Use Google Cloud Translate
+        result = translate_client.translate(
+            text,
+            source_language=source_code,
+            target_language=target_code
+        )
+        
+        translated = result['translatedText']
         
         if not translated:
             return "❌ الترجمة فارغة. يرجى المحاولة مرة أخرى."
