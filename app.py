@@ -1,27 +1,34 @@
 #!/usr/bin/env python3
 """
-Startup script for Goku Translation Bot
-Handles both web service and bot worker
+Goku Translation Bot - Main Application
+Combines web server and bot in one process
 """
 
 import os
 import sys
-import subprocess
 import threading
 import time
 from flask import Flask
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 # Flask app for health check
 app = Flask(__name__)
 
 @app.route('/')
 def health_check():
-    return "OK - Goku bot alive"
+    return "🐉 Goku Bot is alive and running!"
+
+@app.route('/health')
+def health():
+    return {"status": "ok", "bot": "goku", "version": "3.0"}
 
 def run_flask():
     """Run Flask health check server"""
     port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port, debug=False)
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
 
 def run_bot():
     """Run the Telegram bot"""
@@ -30,20 +37,20 @@ def run_bot():
         from bot import main
         main()
     except Exception as e:
-        print(f"Bot error: {e}")
+        print(f"❌ Bot error: {e}")
         sys.exit(1)
 
 def main():
     """Main startup function"""
     print("🐉 Starting Goku Translation Bot...")
     
-    # Check if we have required environment variables
+    # Check environment variables
     required_vars = ['TELEGRAM_BOT_TOKEN', 'GOOGLE_API_KEY']
     missing_vars = [var for var in required_vars if not os.environ.get(var)]
     
     if missing_vars:
         print(f"❌ Missing environment variables: {', '.join(missing_vars)}")
-        print("Please set these in your Render dashboard:")
+        print("Please set these in your deployment platform:")
         for var in missing_vars:
             print(f"  - {var}")
         sys.exit(1)

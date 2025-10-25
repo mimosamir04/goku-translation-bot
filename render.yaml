@@ -1,14 +1,14 @@
 services:
   - type: web
-    name: goku-bot
+    name: goku-translation-bot
     env: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: python start.py
+    startCommand: python app.py
     envVars:
       - key: PORT
         value: 8080
       - key: TELEGRAM_BOT_TOKEN
-        sync: false  # Set this in Render dashboard
+        sync: false
       - key: GOOGLE_API_KEY
-        sync: false  # Set this in Render dashboard
+        sync: false

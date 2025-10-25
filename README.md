@@ -24,16 +24,16 @@ A powerful Telegram bot for bidirectional translation between French and Arabic 
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/yourusername/goku-translation-bot.git
+   git clone https://github.com/mimosamir04/goku-translation-bot.git
    cd goku-translation-bot
    ```
 
-2. **Install dependencies**
+2. **Run setup**
    ```bash
-   pip install -r requirements.txt
+   python setup.py
    ```
 
-3. **Set up environment variables**
+3. **Create .env file**
    ```bash
    cp env.example .env
    # Edit .env with your actual API keys
@@ -41,14 +41,14 @@ A powerful Telegram bot for bidirectional translation between French and Arabic 
 
 4. **Run the bot**
    ```bash
-   python bot.py
+   python app.py
    ```
 
 ## 🔧 Configuration
 
 ### Environment Variables
 
-Create a `.env` file with the following variables:
+Create a `.env` file with:
 
 ```env
 TELEGRAM_BOT_TOKEN=your_telegram_bot_token_here
@@ -89,42 +89,59 @@ Use the bot's name for special interactions:
 - `/about` - Learn about the bot
 - `/ping` - Test bot connectivity
 
+## 🚀 Deployment
+
+### Render (Recommended)
+1. Connect your GitHub repository to Render
+2. Set environment variables in Render dashboard
+3. Deploy automatically
+
+### Heroku
+1. Install Heroku CLI
+2. Create Heroku app: `heroku create your-app-name`
+3. Set environment variables
+4. Deploy: `git push heroku main`
+
+### Local Development
+```bash
+python app.py
+```
+
+## 🔄 Auto-Deploy
+
+To update and deploy automatically:
+
+```bash
+# Quick update
+python deploy.py
+
+# With custom message
+python deploy.py "Fixed translation bug"
+```
+
+## 📁 Project Structure
+
+```
+goku-translation-bot/
+├── app.py              # Main application (web + bot)
+├── bot.py              # Telegram bot logic
+├── requirements.txt    # Python dependencies
+├── render.yaml         # Render deployment config
+├── Procfile            # Heroku deployment
+├── deploy.py           # Auto-deployment script
+├── setup.py            # Setup script
+├── env.example         # Environment template
+└── README.md           # This file
+```
+
 ## 🛠️ Technical Details
 
 ### Technologies Used
 - **Python 3.8+**
 - **python-telegram-bot** - Telegram Bot API
 - **google-generativeai** - Google Gemini AI
+- **flask** - Web server for health checks
 - **python-dotenv** - Environment variable management
-
-### Bot Architecture
-- **Smart Language Detection**: Uses AI to detect input language
-- **Bidirectional Translation**: Supports both French→Arabic and Arabic→French
-- **Auto-Correction**: Automatically fixes spelling and grammar errors
-- **Rate Limiting**: 20 requests per minute per user
-- **Error Handling**: Comprehensive error handling and logging
-
-## 📊 Features in Detail
-
-### Smart Translation
-The bot automatically:
-1. Detects the input language
-2. Corrects any spelling/grammar mistakes
-3. Translates to the target language
-4. Preserves proper names, numbers, and formatting
-
-### User Statistics
-Track your usage with:
-- Total translations
-- Characters translated
-- Usage duration
-- Average translations per day
-
-### Interactive Features
-- Greet the bot by name
-- Ask questions about the bot
-- Get help and information
-- View your personal statistics
 
 ## 🔒 Security & Privacy
 
@@ -133,18 +150,6 @@ Track your usage with:
 - **Secure API**: Uses official Telegram and Google APIs
 - **Environment Variables**: Sensitive data stored securely
 
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-## 📝 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
 ## 👨‍💻 Developer
 
 Created by [@anes_miih19](https://t.me/anes_miih19)
@@ -152,16 +157,8 @@ Created by [@anes_miih19](https://t.me/anes_miih19)
 ## 🆘 Support
 
 If you encounter any issues:
-1. Check the [Issues](https://github.com/yourusername/goku-translation-bot/issues) page
+1. Check the [Issues](https://github.com/mimosamir04/goku-translation-bot/issues) page
 2. Contact the developer: [@anes_miih19](https://t.me/anes_miih19)
-
-## 🎯 Roadmap
-
-- [ ] Support for more languages
-- [ ] Voice message translation
-- [ ] Image text translation
-- [ ] Group chat management
-- [ ] Translation history
 
 ---
 

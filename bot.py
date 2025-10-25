@@ -18,6 +18,10 @@ from telegram.ext import (
 )
 from telegram.constants import ChatAction, ParseMode
 
+import threading
+import server  
+threading.Thread(target=server.__main__).start()
+
 # ========== LOGGING CONFIGURATION ==========
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
