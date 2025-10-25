@@ -7,6 +7,7 @@ import re
 from datetime import datetime
 from typing import Optional, Dict, Any
 from dotenv import load_dotenv
+from collections import deque  # 🔒 حارس التكرار
 
 try:
     from google.cloud import translate_v2
@@ -24,6 +25,9 @@ from telegram.constants import ChatAction
 load_dotenv()
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# 🔒 نخزّن آخر 500 update_id لمنع التكرار
+PROCESSED_UPDATES = deque(maxlen=500)
 
 # ========== Google Translate ==========
 translate_client = None
@@ -120,6 +124,13 @@ async def translate_text(text: str, source: str, target: str, user_id: int) -> s
 # ==================== المعالجة ====================
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # 🔒 حارس تكرار على مستوى update_id
+    upd_id = update.update_id
+    if upd_id in PROCESSED_UPDATES:
+        logger.info(f"⏭️ Skipping duplicated update_id={upd_id}")
+        return
+    PROCESSED_UPDATES.append(upd_id)
+
     user = update.effective_user
     text = (update.message.text or "").strip()
     user_id = user.id
@@ -158,8 +169,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("أرسل نصاً بالعربية أو الفرنسية لأترجمه مباشرة.\n"
-                                    "ابدأ الرسالة بـ 'قوكو' لطرح سؤال ذكاء اصطناعي.")
+    await update.message.reply_text(
+        "أرسل نصاً بالعربية أو الفرنسية لأترجمه مباشرة.\n"
+        "ابدأ الرسالة بـ 'قوكو' لطرح سؤال ذكاء اصطناعي."
+    )
 
 
 # ==================== التشغيل ====================
@@ -170,12 +183,18 @@ def main():
         logger.error("❌ TELEGRAM_BOT_TOKEN مفقود.")
         return
 
+    # 🧼 تنظيف سريع للتوكن + تحقق شكلي
+    token = token.strip().strip('"').strip("'")
+    if not re.match(r'^\d{7,10}:[A-Za-z0-9_-]{35,}$', token):
+        logger.error("❌ TELEGRAM_BOT_TOKEN يبدو غير صحيح (تحقق من النسخ/المسافات/علامات التنصيص).")
+        return
+
     app = Application.builder().token(token).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    logger.info("🚀 Goku bot started.")
+    logger.info("🚀 Goku bot started (polling, single worker).")
     app.run_polling()
 
 if __name__ == "__main__":
